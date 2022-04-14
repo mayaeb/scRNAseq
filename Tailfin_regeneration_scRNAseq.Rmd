@@ -1,0 +1,329 @@
+---
+title: "Tailfin_ regeneration_scRNAseq"
+author: "Maya Emmons-Bell"
+date: "3/31/2022"
+output: html_document
+---
+
+QC, integration, regression, clustering, and data exploration of scRNAseq samples collected over a time course of zebrafish tailfin regeneration. Raw data from Hou et al., Science Advances, 2020. 
+
+set directory to folder where raw count matrices are
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require("knitr")
+opts_knit$set(root.dir = "/Volumes/whitelab/Lab Members/Maya Emmons-Bell/Regeneration scRNAseq/Data")
+```
+
+
+load libraries
+```{r}
+library(Seurat)
+library(tidyverse)
+library(scales)
+library(pals)
+library(cowplot)
+library(fgsea)
+library(msigdbr)
+library(data.table)
+library(gridExtra)
+library(org.Dr.eg.db)
+library(RColorBrewer)
+library(mebfunctions)
+```
+
+load count matrices. in this case, features are named with ensembl ids, not gene names, so i created a custom function to wrangle and rename features (source code can be found in my mebfunctions repo). 
+```{r}
+#load uninjured datasets, pre-process to get emsembl ids for gene re-naming
+uninjured_1 <- read.table(gzfile('GSM4095393_samp1_DGEmatrix.csv.gz'), header = T, sep = ",")
+#use custom function (from mebfunctions) to rename ensembl ids to fish gene names
+uninjured_1 <- meb_rename_ensemblids(uninjured_1)
+
+uninjured_2 <- read.table(gzfile("GSM4095394_samp2_DGEmatrix.csv.gz"), header = T, sep = ",")
+uninjured_2 <- meb_rename_ensemblids(uninjured_2)
+
+#create Seurat objects
+uninjured_1_so <- CreateSeuratObject(counts = uninjured_1, project = "uninjured", min.cells = 3, min.features = 200)
+uninjured_2_so <- CreateSeuratObject(counts = uninjured_2, project = "uninjured", min.cells = 3, min.features = 200)
+
+#merge Seurat objects
+uninjured.combined <- merge(uninjured_1_so, y = uninjured_2_so, add.cell.ids = c("uninjured", "uninjured"))
+
+#repeat for regenerating d1-4 datasets 
+regend1_1 <- read.table(gzfile("GSM4095395_1dpa1_DGEmatrix.csv.gz"), header = T, sep = ",")
+regend1_1 <- meb_rename_ensemblids(regend1_1)
+
+
+regend1_2 <- read.table(gzfile("GSM4095396_1dpa2_DGEmatrix.csv.gz"), header = T, sep = ",")
+regend1_2 <- meb_rename_ensemblids(regend1_2)
+
+regend1_1_so <- CreateSeuratObject(counts = regend1_1, project = "regeneratingd1", min.cells = 3, min.features = 200)
+regend1_2_so <- CreateSeuratObject(counts = regend1_2, project = "regeneratingd1", min.cells = 3, min.features = 200)
+
+regend1.combined <- merge(regend1_1_so, y = regend1_2_so, add.cell.ids = c("regeneratingd1", "regeneratingd1"))
+
+regend2_1 <- read.table(gzfile("GSM4095397_2dpa1_DGEmatrix.csv.gz"), header = T, sep = ",")
+regend2_1 <- meb_rename_ensemblids(regend2_1)
+
+
+regend2_2 <- read.table(gzfile("GSM4095398_2dpa2_DGEmatrix.csv.gz"), header = T, sep = ",")
+regend2_2 <- meb_rename_ensemblids(regend2_2)
+
+regend2_1_so <- CreateSeuratObject(counts = regend2_1, project = "regeneratingd2", min.cells = 3, min.features = 200)
+regend2_2_so <- CreateSeuratObject(counts = regend2_2, project = "regeneratingd2", min.cells = 3, min.features = 200)
+regend2.combined <- merge(regend2_1_so, y = regend2_2_so, add.cell.ids = c("regeneratingd2", "regeneratingd2"))
+
+
+regend4_1 <- read.table(gzfile("GSM4095399_4dpa1_DGEmatrix.csv.gz"), header = T, sep = ",")
+regend4_1 <- meb_rename_ensemblids(regend4_1)
+
+
+regend4_2 <- read.table(gzfile("GSM4095400_4dpa2_DGEmatrix.csv.gz"), header = T, sep = ",")
+regend4_2 <- meb_rename_ensemblids(regend4_2)
+
+regend4_1_so <- CreateSeuratObject(counts = regend4_1, project = "regeneratingd4", min.cells = 3, min.features = 200)
+regend4_2_so <- CreateSeuratObject(counts = regend4_2, project = "regeneratingd4", min.cells = 3, min.features = 200)
+
+regend4.combined <- merge(regend4_1_so, y = regend4_2_so, add.cell.ids = c("regeneratingd4", "regeneratingd4"))
+
+#merge all timepoints into one dataset
+all.combined <- merge(uninjured.combined, y = c(regend1.combined, regend2.combined, regend4.combined))
+```
+
+generate QC metrics and figs - i built a custom function to do this in a consistent way and produce a nice figure, but you could also do it manually. source code for this function available in the mebfunctions repo.
+- we can see that there are slightly more genes and molecules detected in the d2 and d4 datasets, but %mito and log10genes/umi metrics are similar.
+- based on %mito and RNA and feature counts, it looks like this data has already been filtered, but the code below is what i would normally suggest for filtering.  
+```{r}
+QC_plot <- meb_QC_plots(all.combined)
+
+#other useful QC plots 
+all.combined[["percent.mt"]] <- PercentageFeatureSet(all.combined, assay = "RNA", pattern = "^MT-")
+plot1 <- FeatureScatter(all.combined, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(all.combined, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+
+#filter out cells with low numbers of molecules and features sequenced, and high %mito reads (indicative of sick or dying cells)
+all.combined <- subset(all.combined, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+
+```
+
+integrate datasets from four timepoints:
+- normalize data (takes feature counts, divides by total counts, multiplies by scaling factor, natural log)
+- find variable features (identifies genes with high variability between cells)
+- select integration features (ranks all features by the number of datasets in which they are highly variable)
+- find anchors (essentially, this performs the following for all combinations of datasets: dimensional reduction, identification of pairs of cells that are within each other's neighborhoods, filtering of low-confidence anchors by checking to see if query cell is first nieghbors with reference cell at max dimensionality, scores remaining anchors by computing overlap between reference anchor neighbors and query anchor neighbors, and then rescales to reduce outlier effects)
+- integrate data (iterative pairwise integration - orders integration based on pairs of datasets with low cell#/anchor ratios, creates a matrix of weights between query cells and anchors based on distance between cell and anchor, distance between cell and k.weightth anchor, and the anchor score computed previously. then, computes difference between expression matrices of ever pair of anchor cells, computes product of this matrix and the weights matrix, subtracts that product from the original expression matrix)
+```{r}
+ifnb.list <- SplitObject(all.combined, split.by = "orig.ident")
+
+ifnb.list <- lapply(X = ifnb.list, FUN = function(x) {
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+
+features <- SelectIntegrationFeatures(object.list = ifnb.list)
+
+anchors <- FindIntegrationAnchors(object.list = ifnb.list, anchor.features = features)
+
+all.combined.integrated <- IntegrateData(anchorset = anchors)
+
+#save integrated dataset
+saveRDS(all.combined.integrated, file = "all.combined.integrated")
+```
+
+perform linear dimensional reduction, compute neighbors and clusters, visualize and choose resolution
+```{r}
+DefaultAssay(all.combined.integrated) <- "integrated"
+# Run the standard workflow for visualization and clustering
+all.combined.integrated <- ScaleData(object = all.combined.integrated, features = rownames(all.combined.integrated), verbose = F)
+
+# identify genes with high variability between cells
+all.combined.integrated <- FindVariableFeatures(object = all.combined.integrated, selection.method = "vst", verbose = F)
+
+# plot the top 10 most variable genes
+var_feature_plot <- VariableFeaturePlot(all.combined.integrated)
+top10 <- head(VariableFeatures(all.combined.integrated), 10)
+LabelPoints(plot = var_feature_plot, points = top10, repel = TRUE)
+
+# linear dimensional reduction (PCA)
+all.combined.integrated <- RunPCA(all.combined.integrated, npcs = 30, verbose = FALSE)
+#use elbow plot to decide how many dimensions to use - better to be conservative and use more - I'll use 1:15 here
+ElbowPlot(all.combined.integrated)
+
+#find nieghbors
+all.combined.integrated <- FindNeighbors(all.combined.integrated, reduction = "pca", dims = 1:15)
+
+#perform clustering with a range of resolutions, so you can see which defines distinct clusters with minimal cluster mixing
+all.combined.integrated <- FindClusters(all.combined.integrated, resolution = c(0.1, 0.3, 0.5, 0.8, 1), verbose = T)
+
+# non-linear dimensionality reduction (UMAP)
+all.combined.integrated <- RunUMAP(all.combined.integrated, reduction = "pca", dims = 1:30)
+
+# take a look at clustering at a few resolutions to decide which is best (all are saved in metadata now). in this case, 0.1 is too course, 0.8 has a lot of overlap between clusters, but 0.3 looks good.
+DimPlot(all.combined.integrated, group.by = "integrated_snn_res.0.3")
+
+#set identity of cells to this cluster resolution metadata
+Idents(all.combined.integrated) <- "integrated_snn_res.0.3"
+
+#visualize clusters and orig.ident (timepoint) together
+clusters <- DimPlot(all.combined.integrated, reduction = 'umap', group.by = 'integrated_snn_res.0.3', label = TRUE)
+condition <- DimPlot(all.combined.integrated, reduction = 'umap', group.by = 'orig.ident')
+condition|clusters
+```
+score cells based on cell cycle (optional, but i find exploring this very useful, especially in data sets where we know there are proliferation differences between conditions, like this one)
+```{r}
+#read in zebrafish/human translation table, convert human cell cycle gene list to fish
+fish.human.convert.Z11 <- read.delim("GRCz11_to_HS.txt")
+fish.human.convert.Z11 <- fish.human.convert.Z11[fish.human.convert.Z11$DIOPT_Score > 6,]
+fish.human.convert.Z11 <- data.frame(fish.human.convert.Z11$Zebrafish_Symbol,fish.human.convert.Z11$Human_Symbol)
+colnames(fish.human.convert.Z11) = c("Zebrafish_Symbol", "Human_Symbol")
+
+#a list of cell cycle genes are available in Seurat package (cc.genes) - need to translate them to fish gene names
+s.genes <- as_data_frame(cc.genes$s.genes)
+colnames(s.genes) = c("gene")
+
+g2m.genes <- as_data_frame(cc.genes$g2m.genes)
+colnames(g2m.genes) = c("gene")
+
+s.genes.fish <- merge(x = s.genes,
+                y = fish.human.convert.Z11,
+                by.x = "gene",
+                by.y = "Human_Symbol")
+
+s.genes.fish <- s.genes.fish[,2]
+
+g2m.genes.fish <- merge(x = g2m.genes,
+                y = fish.human.convert.Z11,
+                by.x = "gene",
+                by.y = "Human_Symbol")
+
+g2m.genes.fish <- g2m.genes.fish[,2]
+
+#compute cell cycle scores for each cell (this will add "Phase" to metadata, visualize 
+all.combined.integrated <- CellCycleScoring(all.combined.integrated, s.features = s.genes.fish, g2m.features = g2m.genes.fish, set.ident = TRUE)
+
+#visualize cell cycle scores between clusters
+#dim plots
+clusters <- DimPlot(all.combined.integrated, reduction = 'umap', group.by = 'integrated_snn_res.0.3', label = TRUE)
+cell_cycle <- DimPlot(all.combined.integrated, reduction = 'umap', group.by = 'Phase')
+cell_cycle|clusters
+#or, ridge plots
+ridge <- RidgePlot(all.combined.integrated, features = c("pcna", "top2a", "mcm6", "mki67"), ncol = 2)
+
+#run PCA on cell cycle genes 
+all.combined.integrated <- RunPCA(all.combined.integrated, features = c(s.genes.fish, g2m.genes.fish))
+DimPlot(all.combined.integrated, reduction = "pca")
+
+#based on these analysis, it doesnt look like cell cycle is a primary driver of variability in this dataset. i won't regress it out, but if you come across a data set with high variability explained by cell cycle, you can regress out phase using the following code:
+#regress out cell cycle scores 
+#all.combined.integrated.ccreg <- SCTransform(all.combined.integrated, vars.to.regress = c("S.Score", "G2M.Score"), features = rownames(all.combined.integrated))
+
+```
+
+annotate the clusters based on domain gene expression knowledge - here i'm using gene expression patterns that are well characterized in the regenerating tailfin to define cluster identity. you could also find marker genes enriched in each cluster in order to identify them. 
+```{r}
+#for exploratory marker gene expression analysis
+DefaultAssay(all.combined.integrated) <- "integrated"
+
+#convenient code for matching gene expression to cluster number
+gene <- FeaturePlot(all.combined.integrated, features = c("agr2"))
+clusters <- DimPlot(all.combined.integrated, group.by = 'integrated_snn_res.0.3', label = TRUE)
+gene|clusters
+
+
+#assigning identities to clusters 
+mesenchymal <- WhichCells(all.combined.integrated, idents = c(5)) %>% data.frame() %>% mutate(integrated_cell_type = "mesenchymal")
+supep <- WhichCells(all.combined.integrated, idents = c(2, 6, 0, 7)) %>% data.frame() %>% mutate(integrated_cell_type = "superficial epithelium")
+intep <- WhichCells(all.combined.integrated, idents = c(4, 3)) %>% data.frame() %>% mutate(integrated_cell_type = "intermediate epithelium")
+basalep <- WhichCells(all.combined.integrated, idents = c(1, 8)) %>% data.frame() %>% mutate(integrated_cell_type = "basal epithelium")
+hematopoietic <- WhichCells(all.combined.integrated, idents = c(9)) %>% data.frame() %>% mutate(integrated_cell_type = "hematopoietic")
+mucosal_like <- WhichCells(all.combined.integrated, idents = c(10, 11)) %>% data.frame() %>% mutate(integrated_cell_type = "mucosal-like")
+
+#rename cluster identities to cell types
+all.combined.integrated <- RenameIdents(all.combined.integrated, `0` = "Superficial epithelium", `1` = "Basal epithelium", `2` = "Superficial epithelium",
+    `3` = "Intermediate epithelium", `4` = "Intermediate epithelium", `5` = "Mesenchyme", `6` = "Superficial epithelium", `7` = "Superficial epithelium", `8` = "Basal epithelium", `9` = "Hematopoietic", `10` = "Mucosal-like", `11` = "Mucosal-like", `12` = "Hematopoietic")
+#take a look 
+DimPlot(all.combined.integrated, label=T)
+
+```
+
+plot the data seperated by timepoint (in this case, to visualize clearly how populations change over the course of regeneration, and the desparity in cell number between early regeneration data set and d2 and d4)
+```{r}
+
+#make cleaner DimPlots for figures 
+DimPlot((all.combined.integrated), group.by = "orig.ident", pt.size = 1, label = F, label.size = 6) + 
+  scale_color_manual(values = tol(4)) + 
+  theme(axis.text = element_blank(),
+  axis.ticks = element_blank()) +
+  xlab("UMAP 1") + ylab("UMAP 2") + 
+  labs(title = "")
+
+#plot only one sample at a time
+#first, define cells in each sample
+Idents(all.combined.integrated) <- "orig.ident"
+uninjured_cells <- WhichCells(all.combined.integrated, idents = c("uninjured"))
+regend1_cells <- WhichCells(all.combined.integrated, idents = c("regeneratingd1"))
+regend2_cells <- WhichCells(all.combined.integrated, idents = c("regeneratingd2"))
+regend4_cells <- WhichCells(all.combined.integrated, idents = c("regeneratingd4"))
+
+p_uninjured <- DimPlot(all.combined.integrated, 
+        label=F, 
+        cells.highlight= list(uninjured_cells), 
+        cols.highlight = c("darkgreen"),
+        sizes.highlight = 0.05,
+        cols= "darkgray") + 
+      theme(axis.text = element_blank(),
+      axis.ticks = element_blank()) +
+      xlab("UMAP 1") + 
+      ylab("UMAP 2") +
+      theme(legend.position = "none") +
+      ggtitle("Uninjured") +
+      theme(plot.title = element_text(hjust = 0.5))
+
+p_d1 <- DimPlot(all.combined.integrated, 
+        label=F, 
+        cells.highlight= list(regend1_cells), 
+        cols.highlight = c("darkgreen"),
+        sizes.highlight = 0.05,
+        cols= "darkgray") + 
+      theme(axis.text = element_blank(),
+      axis.ticks = element_blank()) +
+      xlab("UMAP 1") + 
+      ylab("UMAP 2") +
+      theme(legend.position = "none") +
+      ggtitle("1DPA") +
+      theme(plot.title = element_text(hjust = 0.5))
+
+p_d2 <- DimPlot(all.combined.integrated, 
+        label=F, 
+        cells.highlight= list(regend2_cells), 
+        cols.highlight = c("darkgreen"),
+        sizes.highlight = 0.025,
+        cols= "darkgray") + 
+      theme(axis.text = element_blank(),
+      axis.ticks = element_blank()) +
+      xlab("UMAP 1") + 
+      ylab("UMAP 2") +
+      theme(legend.position = "none") +
+      ggtitle("2DPA") +
+      theme(plot.title = element_text(hjust = 0.5))
+
+p_d4 <- DimPlot(all.combined.integrated, 
+        label=F, 
+        cells.highlight= list(regend4_cells), 
+        cols.highlight = c("darkgreen"),
+        sizes.highlight = 0.025,
+        cols= "darkgray") + 
+      theme(axis.text = element_blank(),
+      axis.ticks = element_blank()) +
+      xlab("UMAP 1") + 
+      ylab("UMAP 2") +
+      theme(legend.position = "none") +
+      ggtitle("4DPA") +
+      theme(plot.title = element_text(hjust = 0.5))
+
+all_plots <- grid.arrange(p_uninjured,p_d1,p_d2,p_d4,nrow=2 )
+
+
+```
+
+
