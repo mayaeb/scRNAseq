@@ -1,0 +1,118 @@
+---
+title: "scTE"
+author: "Maya Emmons-Bell"
+date: "4/18/2022"
+output: html_document
+---
+
+Exploring transposable element expression in uninjured vs. regenerating zebrafish tailfin tissue. 
+Processing pipeline from He et al., Nature Communications, 2021. 
+
+scTE allocates TE reads to metagenes based on type-specific sequences. 
+This reduces read allocation errors, but also collapses information about TE genome location.
+
+Genome index construction and alignment were completed with a Python script, taking BAM files as input.  
+
+load libraries
+```{r}
+library(Seurat)
+library(SeuratDisk)
+library(mebfunctions)
+```
+
+load scTE outputs
+```{r}
+setwd("/Volumes/whitelab/Lab Members/Maya Emmons-Bell/Regeneration scRNAseq/Data")
+regenerating.scte <- LoadH5Seurat("regen.d4.scte.h5seurat")
+uninjured.scte <- LoadH5Seurat("uninjured.scte.h5seurat")
+
+```
+Add orig.ident, nCount_RNA, nFeature_RNA, and %mito metadata for QC visualization and filtering
+```{r}
+#uninjured data set 
+uninjured.scte$nCount_RNA = colSums(x = uninjured.scte, slot = "counts")  # nCount_RNA
+uninjured.scte$nFeature_RNA = colSums(x = GetAssayData(object = uninjured.scte, slot = "counts") > 0)  # nFeatureRNA
+uninjured.scte[["percent.mt"]] <- PercentageFeatureSet(uninjured.scte, assay = "RNA", pattern = "^MT-")
+uninjured.scte$log10GenesPerUMI <- log10(uninjured.scte$nFeature_RNA) / log10(uninjured.scte$nCount_RNA)
+uninjured.scte$orig.ident <- c("uninjured")
+
+uninjured_QCplot <- meb_QC_plots(uninjured.scte)
+uninjured.scte <- subset(uninjured.scte, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+
+#regenerating data set 
+regenerating.scte$nCount_RNA = colSums(x = regenerating.scte, slot = "counts")  # nCount_RNA
+regenerating.scte$nFeature_RNA = colSums(x = GetAssayData(object = regenerating.scte, slot = "counts") > 0)  # nFeatureRNA
+regenerating.scte[["percent.mt"]] <- PercentageFeatureSet(regenerating.scte, assay = "RNA", pattern = "^MT-")
+regenerating.scte$log10GenesPerUMI <- log10(regenerating.scte$nFeature_RNA) / log10(regenerating.scte$nCount_RNA)
+regenerating.scte$orig.ident <- c("regenerating")
+
+regenerating_QCplot <- meb_QC_plots(regenerating.scte)
+regenerating.scte <- subset(regenerating.scte, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+```
+integrate datasets
+```{r}
+scte.combined <- merge(uninjured.scte, y = regenerating.scte, add.cell.ids = c("uninjured", "regenerating"))
+
+ifnb.list <- SplitObject(scte.combined, split.by = "orig.ident")
+ifnb.list <- lapply(X = ifnb.list, FUN = function(x) {
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+features <- SelectIntegrationFeatures(object.list = ifnb.list)
+anchors <- FindIntegrationAnchors(object.list = ifnb.list, anchor.features = features)
+scte.integrated <- IntegrateData(anchorset = anchors)
+#save integrated dataset
+#saveRDS(scte.integrated, file = "scte.integrated")
+```
+Dim reduction, clustering, visualization
+```{r}
+DefaultAssay(scte.integrated) <- "integrated"
+# Run the standard workflow for visualization and clustering
+scte.integrated <- ScaleData(object = scte.integrated, features = rownames(scte.integrated), verbose = F)
+# identify genes with high variability between cells
+scte.integrated <- FindVariableFeatures(object = scte.integrated, selection.method = "vst", verbose = F)
+# plot the top 10 most variable genes - three of these are TEs!
+var_feature_plot <- VariableFeaturePlot(scte.integrated)
+top10 <- head(VariableFeatures(scte.integrated), 10)
+LabelPoints(plot = var_feature_plot, points = top10, repel = TRUE)
+# linear dimensional reduction (PCA)
+scte.integrated <- RunPCA(scte.integrated, npcs = 30, verbose = FALSE)
+#use elbow plot to decide how many dimensions to use - better to be conservative and use more - I'll use 1:15 here
+ElbowPlot(scte.integrated)
+#find nieghbors
+scte.integrated <- FindNeighbors(scte.integrated, reduction = "pca", dims = 1:15)
+#perform clustering with a range of resolutions, so you can see which defines distinct clusters with minimal cluster mixing
+scte.integrated <- FindClusters(scte.integrated, resolution = c(0.1, 0.3, 0.5, 0.8, 1), verbose = T)
+# non-linear dimensionality reduction (UMAP)
+scte.integrated <- RunUMAP(scte.integrated, reduction = "pca", dims = 1:15)
+# take a look at clustering at a few resolutions to decide which is best (all are saved in metadata now). in this case, 0.1 is too course, 0.8 has a lot of overlap between clusters, but 0.3 looks good.
+DimPlot(scte.integrated, group.by = "integrated_snn_res.0.3")
+#set identity of cells to this cluster resolution metadata
+Idents(scte.integrated) <- "integrated_snn_res.0.3"
+#visualize clusters and orig.ident (timepoint) together
+clusters <- DimPlot(scte.integrated, reduction = 'umap', group.by = 'integrated_snn_res.0.3', label = TRUE)
+condition <- DimPlot(scte.integrated, reduction = 'umap', group.by = 'orig.ident')
+condition|clusters
+```
+
+visualize variably expressed transposable elements
+```{r}
+VlnPlot(scte.integrated, group.by = "orig.ident", assay = "RNA", features = c("CR318588.3", "DNA2-1-DR", "DNA-2-10-DR"))
+FeaturePlot(scte.integrated, split.by = "orig.ident", features = c("CR318588.3", "DNA2-1-DR", "DNA-2-10-DR"))
+```
+
+identify differential expressed genes between timepoints - there don't seem to be TEs that are strongly differentially expressed between day 4 of regeneration, and uninjured tissue. 
+```{r}
+scte.integrated.de <- as.data.frame(log1p(AverageExpression(scte.integrated, verbose = TRUE, group.by = c("orig.ident"))$RNA))
+scte.integrated.de$gene <- rownames(scte.integrated.de)
+scte.integrated.de <- is.finite(scte.integrated.de)
+#marker genes for plot - repeat for each timepoint contrast
+scte.integrated.de <- scte.integrated.de %>% arrange(-regenerating) %>% arrange(uninjured)
+#find transposable elements with high expression at d4 regeneration, low in uninjured cells
+genes.to.label <- c("BX005305.4", "CT997819.5", "CU467856.1", "AL772314.1")
+p1 <- ggplot(scte.integrated.de, aes(uninjured, regenerating)) + geom_point() + ggtitle("Mesenchyme Cluster Avg Gene Expression\n(natural log transformed)") + theme_classic()
+
+p1 <- LabelPoints(plot = p1, points = genes.to.label, repel = TRUE, xnudge = 0, ynudge = 0)
+```
+
+
