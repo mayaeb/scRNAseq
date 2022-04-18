@@ -1,0 +1,124 @@
+---
+title: "blastema_analysis"
+author: "Maya Emmons-Bell"
+date: "4/18/2022"
+output: html_document
+---
+
+Compare gene expression in blastema cells of a regenerating zebrafish tailfin over time, run GSEA to identify biological processes associated with each time point. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+libraries:
+```{r, message = F, warning = F}
+library(Seurat)
+library(tidyverse)
+```
+
+load datasets
+```{r}
+setwd('/Volumes/whitelab/Lab Members/Maya Emmons-Bell/Regeneration scRNAseq/Data')
+regen <- readRDS('all.combined.integrated')
+
+#subset out blastema cluster - in this case I know from prev. analysis that the mesenchyme/blastema cells are cluster #3
+blastema <- subset(all.combined.integrated, idents = c("3"))
+```
+
+specify order of timepoints 
+```{r}
+# Define an order of cluster identities
+my_levels <- c("uninjured", "regeneratingd1", "regeneratingd2", "regeneratingd4")
+
+# Relevel object@ident
+blastema$orig.ident <- factor(x = blastema$orig.ident, levels = my_levels)
+```
+
+identify differential expressed genes between timepoints
+```{r}
+blastema.de <- as.data.frame(log1p(AverageExpression(blastema, verbose = TRUE, group.by = c("orig.ident"))$RNA))
+blastema.de$gene <- rownames(blastema.de)
+blastema.de <- is.finite(blastema.de)
+#marker genes for plot - repeat for each timepoint contrast
+blastema.de <- blastema.de %>% arrange(-regeneratingd1)
+#find genes with high expression at d1 regeneration, low in uninjured cells
+genes.to.label <- c("vmp1", "dkk3b", "c1qtnf5", "hmgb2b", "tnfaip6",
+                     "cycsb", "lepb", "ptgdsb.1", "krt91", "ptgdsb.2", 
+                     "krt15")
+p1 <- ggplot(blastema.de, aes(uninjured, regeneratingd1)) + geom_point() + ggtitle("Mesenchyme Cluster Avg Gene Expression\n(natural log transformed)") + theme_classic()
+
+p1 <- LabelPoints(plot = p1, points = genes.to.label, repel = TRUE, xnudge = 0, ynudge = 0)
+```
+
+plot expression of a gene across timepoints: violin and dot plot
+```{r}
+genes <- c("vmp1", "dkk3b", "c1qtnf5", "hmgb2b", "tnfaip6")
+VlnPlot(blastema, group.by = "orig.ident", assay = "RNA", features = genes)
+DotPlot(blastema, group.by = "orig.ident", assay = "RNA", features = genes)
+```
+
+
+GSEA analysis
+```{r}
+#load pathways for gsea
+human.genes <- msigdbr(species = "Homo sapiens")
+genesets.interest <- filter(human.genes, gs_cat == "H" | gs_subcat == "CP:KEGG" | gs_subcat == "CP:REACTOME" | gs_subcat == "BP")
+pathways.interest <- genesets.interest %>% split(x = .$gene_symbol, f = .$gs_name)
+# GO biological pathways
+genesets.GOBP <- filter(human.genes, gs_subcat == "GO:BP")
+pathways.GOBP <- genesets.GOBP %>% split(x = .$gene_symbol, f = .$gs_name)
+# GO CC
+genesets.GOCC <- filter(human.genes, gs_subcat == "GO:CC")
+pathways.GOCC <- genesets.GOCC %>% split(x = .$gene_symbol, f = .$gs_name)
+#get fish/human conversions 
+fish.human.convert.Z11 <- read_tsv("GRCz11_to_HS.txt", col_names=TRUE)
+
+#identify dif. exp'd genes by time point with FindMarkers() function
+Idents(blastema) <- "orig.ident"
+uninjured_markers <- FindMarkers(object = blastema, ident.1 = c("uninjured"))
+d1_markers <- FindMarkers(object = blastema, ident.1 = c("regeneratingd1"))
+d2_markers <- FindMarkers(object = blastema, ident.1 = c("regeneratingd2"))
+d4_markers <- FindMarkers(object = blastema, ident.1 = c("regeneratingd4"))
+
+uninjured_markers <- uninjured_markers %>% rownames_to_column(var = "gene") %>% 
+  arrange(-avg_log2FC)
+
+merged <- merge(x = uninjured_markers,
+                y = fish.human.convert.Z11,
+                by.x = "gene",
+                by.y = "Zebrafish_Symbol")
+
+#remove duplicates 
+dups <- merged$gene[duplicated(merged$gene)] %>% unique() %>% as.character()
+dups_data <- NULL
+  for (dup in dups) {
+    data <- merged[merged$gene == dup,] %>% arrange(-avg_log2FC)
+    dups_data[[dup]] <- data[1,] # take the expression data for the gene with the highest logFC
+  }
+dups_data <- rbindlist(dups_data)
+merged_new <- rbind(dups_data,
+                      merged[!merged$gene %in% dups,])
+merged_new <- as.data.frame(merged_new)
+merged_new <- merged_new[is.finite(merged_new$avg_log2FC),]
+vector <- merged_new %>% dplyr::select(Human_Symbol,avg_log2FC) %>% arrange(-avg_log2FC) %>% deframe()
+
+#run gsea 
+blastema.markers_GOCC <- fgsea(pathways = pathways.GOCC,
+                           stats = vector, 
+                         nperm = 10000) %>% arrange(desc(NES)) 
+blastema.markers_GOCC <- blastema.markers_GOCC[order(NES, decreasing = T), ]
+
+
+blastema.markers_GOBP <- fgsea(pathways = pathways.GOBP,
+                           stats = vector,
+                           nperm = 10000) %>% arrange(desc(NES)) 
+
+blastema.markers_GOBP <- blastema.markers_GOBP[order(NES, decreasing = T), ]
+
+
+#plotting
+blastema.markers_GOCC_plot <- go_term_bar(blastema.markers_GOCC, n_terms = 30, metric = "NES", fill = T, change_labels = T, pval_fill = T)
+
+#repeat for other timepoints 
+```
