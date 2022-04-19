@@ -1,0 +1,130 @@
+---
+title: "NMF_scRNAseq"
+author: "Maya Emmons-Bell"
+date: "4/19/2022"
+output: html_document
+---
+
+Exploring non-negative matrix factorization to identify gene expression modules in a scRNAseq dataset of regenerating zebrafish caudal fin samples. 
+
+Using implementation from DeBruine et al. (RcppML package). 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=12, fig.height=8, fig.path='Figures/',
+                      echo=TRUE, warning=FALSE, message=FALSE)
+require("knitr")
+opts_knit$set(root.dir = "/Volumes/whitelab/Lab Members/Maya Emmons-Bell/Regeneration scRNAseq/Data")
+```
+
+Load libraries
+```{r libraries}
+library(Seurat)
+library(SeuratData)
+library(tidyverse)
+library(ggrastr)
+library(RcppML)
+library(Matrix)
+library(mebfunctions)
+library(msigdbr)
+library(fgsea)
+```
+
+Load data
+```{r load-object}
+all.combined.integrated <- readRDS(file = "all.combined.integrated")
+```
+
+Define correct rank - run NMF many times with multiple ranks, use elbow to ID appropriate number of ranks to include
+```{r}
+errors <- c() 
+ranks <- seq(1, 50, 3)
+var_genes <- VariableFeatures(all.combined.integrated) 
+
+for(i in ranks){ 
+  cat("rank: ", i, "\n")
+  model <- RcppML::nmf(all.combined.integrated[["RNA"]]@data[var_genes,], i, tol = 1e-3)
+  mse_i <- mse(all.combined.integrated[["RNA"]]@data[var_genes,], model$w, model$d, model$h)
+  errors <- c(errors, mse_i) 
+}
+
+error_dat <- data.frame(Rank = ranks,
+                  MSE = errors)
+
+#plot - error starts following linear slope ~k=20, so I'll use that
+qplot(error_dat$Rank, error_dat$MSE) + geom_vline(xintercept = 20, linetype=2, color="firebrick", size=1) +
+  xlab("Rank (k)") + ylab("MSE") + ggtitle ("NMF error") + theme_bw()
+
+```
+
+Run NMF
+```{r}
+model <- nmf(all.combined.integrated[["RNA"]]@data[var_genes,],
+             k=20, seed = 999, tol=1e-5)
+
+```
+
+Visualizations
+```{r}
+
+#capture UMAP embeddings for each cell 
+df <- data.frame(UMAP1 = Embeddings(all.combined.integrated, 'umap')[,1],
+                 UMAP2 = Embeddings(all.combined.integrated, 'umap')[,2])
+
+#capture "program" weights for each cell
+nmf <- t(model$h)
+colnames(nmf) <- paste0("NMF", 1:20)
+rownames(nmf) <- colnames(all.combined.integrated)
+
+#combine into one data frame 
+df <- cbind(df, nmf)
+
+#plot each program 
+plot_all_programs <- function(program){
+  prog_plot <- ggplot(df, aes(x=UMAP1, y=UMAP2)) +
+    geom_point_rast(size=0.1, shape=16, alpha=0.75, aes_string(color=program)) +
+    scale_color_gradientn(colours=c("lightgrey", "darkgreen"),
+                          name=paste0(program, " program\nactivity")) +
+    ggtitle(program) +
+    theme_classic() +
+    theme(legend.title=element_text(size=12),
+          legend.text=element_text(size=12))
+  
+  return(prog_plot)
+}
+
+plot_list <- lapply(paste0("NMF", 1:20),
+                    plot_all_programs)
+
+cowplot::plot_grid(plotlist = plot_list, ncol=3)
+
+```
+
+Explore NMF 13 (marks blastema cluster) 
+```{r}
+gene_weights <- model$w
+colnames(gene_weights) <- paste0("NMF", 1:20)
+rownames(gene_weights) <- var_genes
+
+#look at top weighted genes in NMF 13 
+head(gene_weights[rev(order(gene_weights[,13])),])
+#pull out top weighted genes in NMF 13 
+NMF13_genes <- gene_weights[rev(order(gene_weights[,13])),] %>% .[,13]
+
+#visualize a few
+meb_FeaturePlot(all.combined.integrated, features=c("mdka", "col1a1a", "fthl27", "krt18b", "pcp4a"))
+```
+Explore NMF 13 more
+```{r}
+nmf13_plot <- plotPrograms("NMF13")
+nmf13_plot
+
+#plot of top-weighted genes - choose cutoff of 0.002 based on dist.
+hist(gene_weights[,13], breaks=50)
+nmf13_genes <- rownames(gene_weights)[gene_weights[,13] > 0.002]
+length(nmf13_genes)
+
+head(nmf13_genes, n=50)
+```
+```
+
