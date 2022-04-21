@@ -126,5 +126,36 @@ length(nmf13_genes)
 
 head(nmf13_genes, n=50)
 ```
+
+See if blastema-like program is present in melanoma cell line - use top 20 NMF13 genes for scoring zebrafish melanoma cells 
+```{r}
+
+top_NMF13_genes <- c("mdka", "col1a1a", "fthl27", "krt18b", "dkk3b", "pcp4a", "and2", "krt18a.1", "postnb", "cfl1", "sparc", "tnfaip6", "and1" , "serpine1", "ecrg4a", "c1qtnf5", "col1a2", "calm2b", "vmp1") %>% list(blastema_like = .)
+
+#score fish melanoma cell line data set
+for (ii in 1:length(top_NMF13_genes)) {
+  marker_genes <- intersect(top_NMF13_genes[[ii]], rownames(zmel_coculture))
+  marker_name <- names(top_NMF13_genes[ii])
+  zmel_coculture <- AddModuleScore(zmel_coculture,
+                            features = list(marker_genes),
+                            name = marker_name)
+}
+
+
+#score regenerating data set
+for (ii in 1:length(top_NMF13_genes)) {
+  marker_genes <- intersect(top_NMF13_genes[[ii]], rownames(all.combined.integrated))
+  marker_name <- names(top_NMF13_genes[ii])
+  all.combined.integrated <- AddModuleScore(all.combined.integrated,
+                            features = list(marker_genes),
+                            name = marker_name)
+}
+
+p1 <- FeaturePlot(zmel_coculture, features = "blastema_like1") + scale_color_gradientn(colours = rev(magma(n = 100)))
+
+
 ```
+
+
+
 
