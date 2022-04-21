@@ -1,0 +1,248 @@
+---
+title: "CellPhoneDB"
+author: "Maya Emmons-Bell"
+date: "4/21/2022"
+output: html_document
+---
+
+Using CellPhoneDB (a repository of curated receptors, ligands, and their interactions - Efremova et al., Nature Protocols, 2020) to identify putative signaling relationships between cells of the regenerating zebrafish tailfin, and a zebrafish melanoma cell line.  
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=4, fig.height=3,
+                      echo=TRUE, warning=FALSE, message=FALSE)
+require("knitr")
+```
+
+Load libraries
+```{r libraries}
+library(Seurat)
+library(tidyverse)
+library(mebfunctions)
+library(msigdbr)
+library(fgsea)
+library(gplots)
+```
+
+Load datasets
+```{r load-data}
+#ZMEL co-culture single cell data set
+co_culture <- readRDS("/Volumes/whitelab/Lab Members/Maya Emmons-Bell/Nate_Seuratobjs/CoCul.rds")
+#ZMEL in vivo transplant single cell data set
+in_vivo <- readRDS("/Volumes/whitelab/Lab Members/Maya Emmons-Bell/Nate_Seuratobjs/CoCul.rds/InVivo_Seurat.Rds")
+#zebrafish regenerating tailfin single cell data set
+regen <- readRDS("/Volumes/whitelab/Lab Members/Maya Emmons-Bell/Regeneration scRNAseq/Data/all.combined.integrated.rds")
+```
+
+Integrate melanoma cell line and regenerating blastema cluster from tailfin object for CellPhoneDB analysis 
+```{r}
+#subset out blastema cells from regenerating object
+blastema <- subset(all.combined.integrated, idents = c("3"))
+#merge blastema cells and ZMEL co-culture
+zmel_mesenchyme <- merge(blastema, y = co_culture)
+
+#integrate the two datasets 
+ifnb.list <- SplitObject(zmel_mesenchyme, split.by = "orig.ident")
+
+ifnb.list <- lapply(X = ifnb.list, FUN = function(x) {
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+
+features <- SelectIntegrationFeatures(object.list = ifnb.list)
+
+anchors <- FindIntegrationAnchors(object.list = ifnb.list, anchor.features = features)
+
+zmel_mesenchyme <- IntegrateData(anchorset = anchors)
+
+#scale, normalize, cluster, etc. 
+zmel_mesenchyme <- ScaleData(zmel_mesenchyme, verbose=FALSE)
+zmel_mesenchyme <- FindVariableFeatures(zmel_mesenchyme)
+zmel_mesenchyme <- RunPCA(zmel_mesenchyme, npcs = 30, verbose = FALSE)
+zmel_mesenchyme <- FindNeighbors(zmel_mesenchyme, reduction = "pca", dims = 1:30)
+zmel_mesenchyme <- FindClusters(all.combined.integrated, resolution = c(0.1, 0.3, 0.5, 0.8, 1), verbose = T)
+zmel_mesenchyme <- RunUMAP(zmel_mesenchyme, reduction = "pca", dims = 1:30)
+
+Idents(zmel_mesenchyme) <- c("orig.ident")
+meb_DimPlot(zmel_mesenchyme, reduction = "umap", group_by = "orig.ident")
+```
+
+Write metadata file for CellPhoneDB input
+```{r}
+
+#write.table changes dashes to periods in the expression matrix, so need to replace dashes with periods in the metadata table so that they match perfectly
+cell_bc <- colnames(zmel_mesenchyme)
+cell_bc <- str_replace(cell_bc, "-", ".")
+write.table(data.frame(Cell_bc = cell_bc, Cell_type = zmel_mesenchyme$orig.ident),
+            file="zmel.blastema.metadata.txt", row.names=F, quote=F, sep="\t")
+```
+
+Converting fish gene IDs to human for CellPhoneDB expression data inputs
+```{r}
+fish.human.convert.Z11 <- read.delim("GRCz11_to_HS.txt")
+expr_mat_rows <- as.data.frame(expr_mat_rows)
+colnames(expr_mat_rows) <- c("gene")
+expr_mat_rows$rownum <- 1:nrow(expmat.rows) #to re-order after merge
+merge <- merge(x=expr_mat_rows, 
+               y= fish.human.convert.Z11, 
+               by.x = "gene", 
+               by.y = "Zebrafish_Symbol", 
+               all = TRUE)
+
+#no idea why there is one more element in the merged list than the original... 
+#removing the last element to be able to rename the rows 
+merge <- !duplicated(merge$rownum)
+merge <- merge[!duplicated(merge[ , c("rownum")]),] %>% arrange(rownum)
+human_ortho <- merge$Human_Symbol 
+human_ortho <- human_ortho[1:24615] %>% as.vector()
+
+rownames(expr_mat) = human_ortho
+colnames(expr_mat) = colnames(zmel_mesenchyme)
+
+#writing tables for CellPhoneDB
+write.table(expr_mat, file="zmel.blastema.expr.txt", quote=F, sep="\t")
+
+```
+
+CellPhoneDB is run with the expression matrix and metadata in a python environment
+
+Analyze and visualize CellPhoneDP results
+```{r}
+p <- read.csv("cpdb_out/pvalues.txt", header=T, sep="\t", check.names=F)
+num_pairs <- colSums(p[,-(1:11)] < 0.01)
+num_pairs <- data.frame(partner1 = sapply(strsplit(names(num_pairs),"\\|"),"[",1),
+                        partner2 = sapply(strsplit(names(num_pairs),"\\|"),"[",2),
+                        num = num_pairs)
+mat_num_pairs <- sapply(sort(unique(num_pairs$partner1)), function(x)
+  sapply(sort(unique(num_pairs$partner2)), function(y)
+    num_pairs$num[which(num_pairs$partner1 == x & num_pairs$partner2 == y)]))
+
+bluered_colscheme <- colorRampPalette(c("#4575B4","#9DCEE3","#EFE9C3","#FA9D59","#D73027"))
+heatmap.2(mat_num_pairs + t(mat_num_pairs) - diag(diag(mat_num_pairs)),
+          trace="none", scale="none", col = bluered_colscheme(30), key=F, keysize=0.5, margins = c(12,12))
+
+
+#plot dot plot (source code from CellPhoneDB package)
+p <- p[p$secreted=="True" &
+         ((p$receptor_a == "True" & p$receptor_b == "False") |
+          (p$receptor_a == "False" & p$receptor_b == "True")),]
+
+idx <- which(p$receptor_a == "False")
+num_pairs <- colSums(p[idx,-(1:11)] < 0.05)
+num_pairs <- data.frame(from = sapply(strsplit(names(num_pairs),"\\|"),"[",1),
+                        to = sapply(strsplit(names(num_pairs),"\\|"),"[",2),
+                        num = num_pairs)
+idx <- which(p$receptor_a == "True")
+num_pairs_2 <- colSums(p[idx,-(1:11)] < 0.05)
+num_pairs_2 <- data.frame(from = sapply(strsplit(names(num_pairs_2),"\\|"),"[",2),
+                          to = sapply(strsplit(names(num_pairs_2),"\\|"),"[",1),
+                          num = num_pairs_2)
+num_pairs$num <- num_pairs$num + num_pairs_2$num
+mat_num_pairs <- sapply(sort(unique(num_pairs$from)), function(x)
+  sapply(sort(unique(num_pairs$to)), function(y)
+    num_pairs$num[which(num_pairs$from == x & num_pairs$to == y)]))
+
+bluered_colscheme <- colorRampPalette(c("#4575B4","#9DCEE3","#EFE9C3","#FA9D59","#D73027"))
+heatmap.2(mat_num_pairs,
+          trace="none", scale="none", col = bluered_colscheme(30), key=F, keysize=0.8, margins = c(12,12),
+          xlab="FROM", ylab="TO")
+
+dot_plot = function(selected_rows = NULL,
+                    selected_columns = NULL,
+                    filename = 'plot.pdf',
+                    width = 8,
+                    height = 10,
+                    means_path = './means.txt',
+                    pvalues_path = './pvalues.txt',
+                    means_separator = '\t',
+                    pvalues_separator = '\t',
+                    output_extension = '.pdf'
+){
+
+  all_pval = read.table(pvalues_path, header=T, stringsAsFactors = F, sep=means_separator, comment.char = '', check.names=F)
+  all_means = read.table(means_path, header=T, stringsAsFactors = F, sep=pvalues_separator, comment.char = '', check.names=F)
+
+  intr_pairs = all_pval$interacting_pair
+  all_pval = all_pval[,-c(1:11)]
+  all_means = all_means[,-c(1:11)]
+
+  if(is.null(selected_rows)){
+    selected_rows = intr_pairs
+  }
+
+  if(is.null(selected_columns)){
+    selected_columns = colnames(all_pval)
+  }
+
+  sel_pval = all_pval[match(selected_rows, intr_pairs), selected_columns]
+  sel_means = all_means[match(selected_rows, intr_pairs), selected_columns]
+
+  df_names = expand.grid(selected_rows, selected_columns)
+  pval = unlist(sel_pval)
+  pval[pval==0] = 0.0009
+  plot.data = cbind(df_names,pval)
+  pr = unlist(as.data.frame(sel_means))
+  pr[pr==0] = 1
+  plot.data = cbind(plot.data,log2(pr))
+  colnames(plot.data) = c('pair', 'clusters', 'pvalue', 'mean')
+
+  my_palette <- colorRampPalette(c("black", "blue", "yellow", "red"), alpha=TRUE)(n=399)
+
+  ggplot(plot.data,aes(x=clusters,y=pair)) +
+  geom_point(aes(size=-log10(pvalue),color=mean)) +
+  scale_color_gradientn('Log2 mean (Molecule 1, Molecule 2)', colors=my_palette) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank(),
+        axis.text=element_text(size=14, colour = "black"),
+        axis.text.x = element_text(angle = 90, hjust = 1),
+        axis.text.y = element_text(size=12, colour = "black"),
+        axis.title=element_blank(),
+        panel.border = element_rect(size = 0.7, linetype = "solid", colour = "black"))
+
+  if (output_extension == '.pdf') {
+      ggsave(filename, width = width, height = height, limitsize=F)
+  }
+  else {
+      ggsave(filename, width = width, height = height, limitsize=F)
+  }
+}
+
+#plot most relevant interactions - columns are group relationships, rows are ligand/receptor pairs
+plot <- dot_plot(filename = 'cpdb.test.pdf',
+                 selected_columns = c("regeneratingd1|CoCulINV", "regeneratingd1|CoCulPRO","regeneratingd2|CoCulINV", "regeneratingd2|CoCulPRO", "regeneratingd4|CoCulINV", "regeneratingd4|CoCulPRO"),
+                 #selected_rows = c(),
+                  width = 8,
+                  height = 100,
+                  means_path = "cpdb.211202.out/means.txt",
+                  pvalues_path = "cpdb.211202.out/pvalues.txt")
+ 
+view(plot)
+
+# for reference - eph/ephrin rows 
+#                                   "EPHA3_EFNA4", "EPHA2_EFNA4",
+#                                   "EPHA3_EFNA3", "EPHA2_EFNA3",
+#                                   "EFNB2_EPHB1", "EFNB2_EPHB3", 
+#                                   "EPHA3_EFNA5", "EPHA2_EFNA5", 
+#                                   "EPHB2_EFNA5", "EFNB2_EPHB4", 
+#                                   "EPHA4_EFNB3", "EPHB1_EFNB3", 
+#                                   "EPHB1_EFNB3", "EPHB4_EFNB3", 
+#                                   "EPHB4_EFNB3", "EPHB3_EFNB3", 
+#                                   "EPHB2_EFNB3", "EPHA4_EFNB1", 
+#                                   "EPHB1_EFNB1", "EPHB4_EFNB1", 
+#                                   "EPHB3_EFNB1", "EPHB2_EFNB1", 
+#                                   "EPHB2_EFNB2"
+
+# for reference - tnc rows 
+#                                   "TNC_a4b1 complex", "TNC_aVb6 complex", 
+#                                   "TNC_a9b1 complex", "TNC_a8b1 complex",
+#                                   "TNC_aVb3 complex"
+#for reference - fn1 
+#
+#                                   "FN1_aVb5 complex", "FN1_aVb1 complex",
+#                                   "FN1_a8b1 complex", "FN1_a5b1 complex", 
+#                                   "FN1_a4b1 complex", "FN1_a3b1 complex",
+#
+#
+
+```
+
