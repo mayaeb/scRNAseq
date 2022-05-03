@@ -1,0 +1,165 @@
+---
+title: "MAGIC"
+author: "Maya Emmons-Bell"
+date: "5/2/2022"
+output: html_document
+---
+
+Using MAGIC (van Djik et al., Cell 2018), a method that uses diffusion geometry to impute and smooth scRNAseq data 
+for downstream analysis, to analyze regenerating zebrafish tailfin scRNAseq data. 
+
+The MAGIC algorithm:
+1. imputes gene expression across highly similar cells
+2. creates affinity matrix:
+  - PCA
+  - adaptive Gaussian kernel to convert distances into exponentially-decaying affinities 
+3. creates Markov transition matrix (M); M^t is matrix of probability distributions that a random walk of length
+    t starting at cell i will reach cell j
+4. multiplies M^t matrix by original untransformed count matrix (restores cells to original manifold)
+
+I'm exploring expression modules that define cell states in regenerating blastema tissue.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=4, fig.height=4, fig.path='figures/',
+                      echo=TRUE, warning=FALSE, message=FALSE)
+require("knitr")
+```
+
+quick function to make it easy to customize fig sizes throughout the notebook 
+```{r}
+fig <- function(width, height){
+     options(repr.plot.width = width, repr.plot.height = height)
+}
+```
+
+load libraries 
+```{r load-libraries}
+
+library(readr)
+library(ggplot2)
+library(viridis)
+library(phateR)
+library(Rmagic)
+library(Seurat)
+library(tidyverse)
+library(RColorBrewer)
+library(gridExtra)
+
+```
+
+
+load data and get it in the correct format for MAGIC
+```{r load-data}
+
+all.combined.integrated <- readRDS("all.combined.integrated.rds")
+
+#subsetting blastema cell population 
+Idents(all.combined.integrated) <- "integrated_snn_res.0.3"
+blastema <- subset(all.combined.integrated, idents = c("3"))
+
+#get count matrix from object, transpose, make data frame
+blastema.matrix <- blastema@assays$RNA@counts %>% as.matrix() %>% base::t() %>% as.data.frame()
+
+#get metadata (for later)
+blastema.metadata <- blastema@meta.data
+
+#take a look
+head(blastema.matrix)
+```
+
+
+filter data 
+```{r}
+
+#keep features expressed in at least 10 cells 
+#this was done previously for this data set, so dims of object don't change
+keep_cols <- colSums(blastema.matrix > 0) > 10
+blastema.matrix <- blastema.matrix[,keep_cols]
+
+
+# look at the distribution of library sizes - we already removed cells with small library sizes, so don't need to do anything here
+ggplot() +
+  geom_histogram(aes(x=rowSums(blastema.matrix)), bins=50) +
+  geom_vline(xintercept = 1000, color='red')
+
+```
+
+
+normalize and transform data 
+```{r norm-and-transform}
+
+#MAGIC authors recommend transforming by sqrt
+blastema.matrix <- library.size.normalize(blastema.matrix)
+if (FALSE) {
+  blastema.matrix <- sqrt(blastema.matrix)
+}
+```
+
+
+run magic 
+```{r magic}
+options(future.globals.maxSize = 8000 * 1024^2)
+blastema_MAGIC <- magic(blastema.matrix, knn=15, genes=c("msx1b", "krt15", "hmgn2"))
+```
+
+plot data before and after MAGIC
+```{r}
+#before
+ggplot(blastema.matrix) +
+  geom_point(aes(hmgn2, krt15, color=msx1b)) +
+  scale_color_viridis(option="B")
+
+#after
+ggplot(blastema_MAGIC) +
+  geom_point(aes(hmgn2, krt15, color=msx1b)) +
+  scale_color_viridis(option="B")
+
+#there is certainly a continuum of cell states characterized by krt15 (uninjured cells)/hmgn2 (early regeneration) expression
+#known blastema marker msx1b marks regenerating cells 
+
+```
+
+try different values of t 
+```{r}
+blastema_MAGIC <- magic(blastema.matrix, knn=15, genes=c("msx1b", "hmgn2", "krt15"), 
+                        t = 12)
+
+ggplot(blastema_MAGIC) +
+  geom_point(aes(hmgn2, krt15, color=msx1b)) +
+  scale_color_viridis(option="B")
+
+```
+
+MAGIC on all genes
+```{r}
+all.blastema_MAGIC <- magic(blastema.matrix, genes="all_genes",
+                    knn=15, init=blastema_MAGIC)
+
+as.data.frame(all.blastema_MAGIC)[1:5, 1:10]
+```
+
+Add metadata, take a look at timepoint after MAGIC
+```{r}
+#add time point metadata
+blastema_MAGIC$timepoint <- blastema.metadata$orig.ident
+blastema_MAGIC <- as.data.frame(blastema_MAGIC)
+
+#reorder levels 
+blastema_MAGIC$timepoint <- factor(blastema_MAGIC$timepoint, levels = c("uninjured", "regeneratingd1", "regeneratingd2", "regeneratingd4"))
+
+
+p1 <- ggplot(blastema_MAGIC) +
+  geom_point(aes(hmgn2, krt15, color=msx1b)) +
+  theme_classic() +
+  scale_color_viridis(option="B")
+
+p2 <- ggplot(blastema_MAGIC) +
+  geom_point(aes(hmgn2, krt15, color = timepoint)) +
+  theme_classic() 
+
+
+all_plots <- grid.arrange(p1, p2,nrow=2 )
+
+```
+

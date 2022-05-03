@@ -11,7 +11,7 @@ Using implementation from DeBruine et al. (RcppML package).
 
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(fig.width=12, fig.height=8, fig.path='Figures/',
+knitr::opts_chunk$set(fig.width=6, fig.height=4, fig.path='Figures/',
                       echo=TRUE, warning=FALSE, message=FALSE)
 require("knitr")
 opts_knit$set(root.dir = "/Volumes/whitelab/Lab Members/Maya Emmons-Bell/Regeneration scRNAseq/Data")
@@ -20,7 +20,6 @@ opts_knit$set(root.dir = "/Volumes/whitelab/Lab Members/Maya Emmons-Bell/Regener
 Load libraries
 ```{r libraries}
 library(Seurat)
-library(SeuratData)
 library(tidyverse)
 library(ggrastr)
 library(RcppML)
@@ -28,11 +27,14 @@ library(Matrix)
 library(mebfunctions)
 library(msigdbr)
 library(fgsea)
+library(viridis)
+library(dplyr)
+library(mvhfunctions)
 ```
 
 Load data
 ```{r load-object}
-all.combined.integrated <- readRDS(file = "all.combined.integrated")
+all.combined.integrated <- readRDS(file = "/Volumes/whitelab/Lab Members/Maya Emmons-Bell/Regeneration scRNAseq/Data/all.combined.integrated")
 ```
 
 Define correct rank - run NMF many times with multiple ranks, use elbow to ID appropriate number of ranks to include
@@ -98,60 +100,162 @@ plot_list <- lapply(paste0("NMF", 1:20),
 
 cowplot::plot_grid(plotlist = plot_list, ncol=3)
 
+#find blastema cluster
+FeaturePlot(all.combined.integrated, features = c("msx1b"))
+
 ```
 
-Explore NMF 13 (marks blastema cluster) 
+Explore NMFs that mark blastema cluster (11, 14, 17, 20)
 ```{r}
 gene_weights <- model$w
 colnames(gene_weights) <- paste0("NMF", 1:20)
 rownames(gene_weights) <- var_genes
 
-#look at top weighted genes in NMF 13 
-head(gene_weights[rev(order(gene_weights[,13])),])
-#pull out top weighted genes in NMF 13 
-NMF13_genes <- gene_weights[rev(order(gene_weights[,13])),] %>% .[,13]
+#pull out top weighted genes in NMFs of interest
+NMF11_genes <- gene_weights[rev(order(gene_weights[,11])),] %>% .[,11]
+NMF14_genes <- gene_weights[rev(order(gene_weights[,14])),] %>% .[,14]
+NMF17_genes <- gene_weights[rev(order(gene_weights[,17])),] %>% .[,17]
+NMF20_genes <- gene_weights[rev(order(gene_weights[,20])),] %>% .[,20]
 
 #visualize a few
-meb_FeaturePlot(all.combined.integrated, features=c("mdka", "col1a1a", "fthl27", "krt18b", "pcp4a"))
+FeaturePlot(all.combined.integrated, features=c("f3b", "krt4", "krt8", "si:ch211-106h4.12", "zgc:162730", "krt18b"))
 ```
-Explore NMF 13 more
+
+Explore NMF 17 more
 ```{r}
-nmf13_plot <- plotPrograms("NMF13")
-nmf13_plot
+nmf17_plot <- plotPrograms("NMF17")
 
 #plot of top-weighted genes - choose cutoff of 0.002 based on dist.
-hist(gene_weights[,13], breaks=50)
-nmf13_genes <- rownames(gene_weights)[gene_weights[,13] > 0.002]
-length(nmf13_genes)
+hist(gene_weights[,17], breaks=50)
+nmf17_genes <- rownames(gene_weights)[gene_weights[,17] > 0.002]
+length(nmf17_genes)
 
-head(nmf13_genes, n=50)
+head(nmf17_genes, n=50)
 ```
 
-See if blastema-like program is present in melanoma cell line - use top 20 NMF13 genes for scoring zebrafish melanoma cells 
+See if blastema-like program is present in zebrafish melanoma sample and melanoma cell line
 ```{r}
 
-top_NMF13_genes <- c("mdka", "col1a1a", "fthl27", "krt18b", "dkk3b", "pcp4a", "and2", "krt18a.1", "postnb", "cfl1", "sparc", "tnfaip6", "and1" , "serpine1", "ecrg4a", "c1qtnf5", "col1a2", "calm2b", "vmp1") %>% list(blastema_like = .)
+top_NMF17_genes <- c("hmgn2", "si:ch73-281n10.2", "hmgb2a", "hmgb2b", "tubb2b", "hmga1a") %>% list(blastema_like = .)
 
 #score fish melanoma cell line data set
-for (ii in 1:length(top_NMF13_genes)) {
-  marker_genes <- intersect(top_NMF13_genes[[ii]], rownames(zmel_coculture))
-  marker_name <- names(top_NMF13_genes[ii])
-  zmel_coculture <- AddModuleScore(zmel_coculture,
-                            features = list(marker_genes),
-                            name = marker_name)
-}
-
-
-#score regenerating data set
-for (ii in 1:length(top_NMF13_genes)) {
-  marker_genes <- intersect(top_NMF13_genes[[ii]], rownames(all.combined.integrated))
-  marker_name <- names(top_NMF13_genes[ii])
+for (ii in 1:length(top_NMF17_genes)) {
+  marker_genes <- intersect(top_NMF17_genes[[ii]], rownames(all.combined.integrated))
+  marker_name <- names(top_NMF17_genes[ii])
   all.combined.integrated <- AddModuleScore(all.combined.integrated,
                             features = list(marker_genes),
+                            name = marker_name, 
+                            assay = "RNA")
+}
+
+
+#score tumor+microenvironment data set
+tumor_tme <- load("/Volumes/whitelab/Lab Members/Maya Emmons-Bell/Nate_Seuratobjs/EF_integrated_allgenes_new.R")
+tumor_tme <- EF.filt
+
+for (ii in 1:length(top_NMF17_genes)) {
+  marker_genes <- intersect(top_NMF17_genes[[ii]], rownames(tumor_tme))
+  marker_name <- names(top_NMF17_genes[ii])
+  EF.filt <- AddModuleScore(tumor_tme,
+                            features = list(marker_genes),
                             name = marker_name)
 }
 
-p1 <- FeaturePlot(zmel_coculture, features = "blastema_like1") + scale_color_gradientn(colours = rev(magma(n = 100)))
+p1 <- FeaturePlot(EF.filt, features = "blastema_like1", pt.size = 0.5, sort = TRUE) + scale_color_gradientn(colours = rev(viridis(n = 100))) + ggtitle("NMF17 module expression in BRAF tumor/TME") 
+p2 <- DimPlot(EF.filt)
+p1|p2
+
+```
+
+GSEA analysis to identify biological processes associated NMF modules
+```{r gsea}
+#load pathways for gsea
+human.genes <- msigdbr(species = "Homo sapiens")
+genesets.interest <- filter(human.genes, gs_cat == "H" | gs_subcat == "CP:KEGG" | gs_subcat == "CP:REACTOME" | gs_subcat == "BP")
+pathways.interest <- genesets.interest %>% split(x = .$gene_symbol, f = .$gs_name)
+# GO biological pathways
+genesets.GOBP <- filter(human.genes, gs_subcat == "GO:BP")
+pathways.GOBP <- genesets.GOBP %>% split(x = .$gene_symbol, f = .$gs_name)
+# GO CC
+genesets.GOCC <- filter(human.genes, gs_subcat == "GO:CC")
+pathways.GOCC <- genesets.GOCC %>% split(x = .$gene_symbol, f = .$gs_name)
+
+fish.human.convert.Z11 <- read.delim('/Volumes/whitelab/Lab Members/Maya Emmons-Bell/Regeneration scRNAseq/Data/GRCz11_to_HS.txt')
+fish.human.convert.Z11 <- fish.human.convert.Z11[fish.human.convert.Z11$DIOPT_Score > 6,] 
+
+
+NMF17_genes <- NMF17_genes %>% as.data.frame()
+NMF17_genes <- rownames_to_column(v, "gene")
+colnames(NMF17_genes) <- c("gene", "score")
+
+merged <- merge(x = NMF17_genes,
+                  y = fish.human.convert.Z11,
+                  by.x = "gene",
+                  by.y = "Zebrafish_Symbol")
+
+vector <- merged %>% dplyr::select(Human_Symbol, score) %>% arrange(-score) %>% deframe()
+
+#run gsea analyses 
+NMF17_GOCC <- fgsea(pathways = pathways.GOCC,
+                           stats = vector,
+                           nperm = 10000) %>% arrange(desc(NES)) 
+NMF17_GOCC <- NMF17_GOCC[order(NES, decreasing = T), ]
+
+
+NMF20_GOBP <- fgsea(pathways = pathways.GOBP,
+                           stats = vector,
+                           nperm = 10000) %>% arrange(desc(NES)) 
+
+NMF20_GOBP <- NMF20_GOBP[order(NES, decreasing = T), ]
+
+#plotting
+NMF17_GOCC_plot <- go_term_bar(NMF17_GOCC, n_terms = 20, metric = "NES", fill = T, change_labels = T, pval_fill = T)
+
+```
+
+See if NMF17 gene program is enriched in dividing cells
+```{r}
+
+#in tumor/tme data 
+EF.filt <- CellCycleScoring(EF.filt, s.features = s.genes.fish, g2m.features = g2m.genes.fish, set.ident = TRUE)
+
+phase.blastema <- EF.filt$integrated_cell_type %>% as.data.frame()
+phase.blastema[,2] <- EF.filt$blastema_like1
+phase.blastema[,3] <- EF.filt$Phase
+colnames(phase.blastema) <- c("cell_type", "NMF17_weight", "phase")
+
+p1 <- ggplot(phase.blastema, aes(phase, NMF17_weight)) + 
+  geom_violin(aes(fill=cell_type)) +
+  #geom_jitter(height = 0, width = 0.1) + 
+  theme_classic() +
+  theme(plot.title = element_text(size = 12, face = "bold", hjust=0),
+        axis.ticks = element_blank()) +
+  xlab("Cell Cycle Phase")+
+  ylab("NMF17 Score") +
+  scale_fill_brewer(palette = "Set2") 
+  #NoLegend()
+
+#in regenerating data 
+all.combined.integrated <- CellCycleScoring(all.combined.integrated, s.features = s.genes.fish, g2m.features = g2m.genes.fish, set.ident = TRUE)
+
+phase.blastema <- all.combined.integrated$integrated_snn_res.0.8 %>% as.data.frame()
+phase.blastema[,2] <- all.combined.integrated$blastema_like1
+phase.blastema[,3] <- all.combined.integrated$Phase
+colnames(phase.blastema) <- c("cluster", "NMF17_weight", "phase")
+
+p1 <- ggplot(phase.blastema, aes(phase, NMF17_weight)) + 
+  geom_violin(aes(fill=phase)) +
+  geom_jitter(height = 0, width = 0.1) + 
+  theme_classic() +
+  theme(plot.title = element_text(size = 12, face = "bold", hjust=0),
+        axis.ticks = element_blank()) +
+  xlab("Cell Cycle Phase")+
+  ylab("NMF17 Score") +
+  ggtitle("Regenerating caudal fin data set")
+  scale_fill_brewer(palette = "Set2")
+
+
+all.combined.integrated@meta.data
 
 
 ```
