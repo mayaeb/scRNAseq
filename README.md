@@ -9,4 +9,4 @@ Scripts for analyzing single cell RNAseq data
 | blastema_analysis.Rmd  | Analysis of a cell-type specific cluster over time |
 | scTE.Rmd  | Analysis of transposable element expression |
 | CellPhoneDB.Rmd  | Analysis of ligand/receptor relationships between cell types|
-| MAGIC.Rmd  | Using MAGIC (van Djik et al., Cell 2018) to impute and smooth scRNAseq data, and explore cell state transitions|
+| MAGIC.Rmd  | Using MAGIC to impute and smooth scRNAseq data, and explore cell state transitions|
